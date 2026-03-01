@@ -1,0 +1,83 @@
+name: Compile ruleset
+
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Download and process China IP list
+        run: |
+          echo "Downloading China IP list..."
+          curl -fsSL -o /tmp/china_ips.txt https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china46.txt
+          echo "Downloaded $(wc -l < /tmp/china_ips.txt) IP entries"
+      
+      - name: Create ruleset JSON
+        run: |
+          echo "Creating ruleset JSON..."
+          
+          mkdir -p ruleset
+          
+          jq -n --rawfile ips /tmp/china_ips.txt '{
+            version: 2,
+            rules: [
+              {
+                ip_cidr: ($ips | split("\n") | map(select(length > 0)))
+              }
+            ]
+          }' > ruleset/cn.json
+          
+          echo "Created ruleset/cn.json"
+      
+      - name: Download and compile with sing-box
+        run: |
+          VERSION="1.12.22"
+          ARCH="linux-amd64"
+          
+          echo "Downloading sing-box..."
+          curl -fsSL -o /tmp/sing-box.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-${ARCH}.tar.gz"
+          
+          echo "Extracting sing-box..."
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          chmod +x "/tmp/sing-box-${VERSION}-${ARCH}/sing-box"
+          
+          echo "Compiling ruleset..."
+          "/tmp/sing-box-${VERSION}-${ARCH}/sing-box" rule-set compile ruleset/cn.json
+          
+          echo "Compiled ruleset/cn.srs successfully"
+      
+      - name: Commit and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf .git
+          git config --global init.defaultBranch main
+          git init
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit --allow-empty-message --no-edit
+          git remote add origin https://github-action:$GITHUB_TOKEN@github.com/${{ github.repository }}.git
+          git push origin main --force
+          echo "Successfully pushed to main branch"
+
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 3
+          keep_minimum_runs: 1
