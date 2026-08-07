@@ -2,82 +2,123 @@ name: Compile ruleset
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: "0 19 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: write
 
+concurrency:
+  group: compile-ruleset
+  cancel-in-progress: false
+
+env:
+  SING_BOX_VERSION: "1.12.25"
+  CHINA_IP_LIST_URL: "https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china46.txt"
+
 jobs:
   update:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-        
-      - name: Download and process China IP list
-        run: |
-          echo "Downloading China IP list..."
-          curl -fsSL -o /tmp/china_ips.txt https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china46.txt
-          echo "Downloaded $(wc -l < /tmp/china_ips.txt) IP entries"
-      
-      - name: Create ruleset JSON
-        run: |
-          echo "Creating ruleset JSON..."
-          
-          mkdir -p ruleset
-          
-          jq -n --rawfile ips /tmp/china_ips.txt '{
-            version: 2,
-            rules: [
-              {
-                ip_cidr: ($ips | split("\n") | map(select(length > 0)))
-              }
-            ]
-          }' > ruleset/cn.json
-          
-          echo "Created ruleset/cn.json"
-      
-      - name: Download and compile with sing-box
-        run: |
-          VERSION="1.12.25"
-          ARCH="linux-amd64"
-          
-          echo "Downloading sing-box..."
-          curl -fsSL -o /tmp/sing-box.tar.gz \
-            "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-${ARCH}.tar.gz"
-          
-          echo "Extracting sing-box..."
-          tar -xzf /tmp/sing-box.tar.gz -C /tmp
-          chmod +x "/tmp/sing-box-${VERSION}-${ARCH}/sing-box"
-          
-          echo "Compiling ruleset..."
-          "/tmp/sing-box-${VERSION}-${ARCH}/sing-box" rule-set compile ruleset/cn.json
-          
-          echo "Compiled ruleset/cn.srs successfully"
-      
-      - name: Commit and push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          ref: main
+
+      - name: Install sing-box
+        shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf .git
-          git config --global init.defaultBranch main
-          git init
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .
-          git commit --allow-empty-message --no-edit
-          git remote add origin https://github-action:$GITHUB_TOKEN@github.com/${{ github.repository }}.git
-          git push origin main --force
-          echo "Successfully pushed to main branch"
+
+          archive="sing-box-${SING_BOX_VERSION}-linux-amd64.tar.gz"
+          install_dir="${RUNNER_TEMP}/sing-box-${SING_BOX_VERSION}-linux-amd64"
+
+          curl -fsSLo "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
+
+          tar -xzf "${RUNNER_TEMP}/${archive}" \
+            -C "${RUNNER_TEMP}"
+
+          "${install_dir}/sing-box" version
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+
+      - name: Build China IP ruleset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          source_file="${RUNNER_TEMP}/china46.txt"
+          output_dir="ruleset"
+          json_file="${output_dir}/cn.json"
+          srs_file="${output_dir}/cn.srs"
+
+          echo "Downloading China IP list..."
+
+          curl -fsSLo "${source_file}" \
+            "${CHINA_IP_LIST_URL}"
+
+          mkdir -p "${output_dir}"
+
+          # Convert the plain-text CIDR list to the sing-box source format.
+          jq -n --rawfile ips "${source_file}" '
+            (
+              $ips
+              | split("\n")
+              | map(rtrimstr("\r"))
+              | map(select(length > 0))
+            ) as $cidrs
+            | if ($cidrs | length) == 0 then
+                error("Downloaded China IP list is empty")
+              else
+                {
+                  version: 2,
+                  rules: [
+                    {
+                      ip_cidr: $cidrs
+                    }
+                  ]
+                }
+              end
+          ' > "${json_file}"
+
+          entry_count="$(
+            jq -r '.rules[0].ip_cidr | length' "${json_file}"
+          )"
+
+          echo "Created ${json_file} with ${entry_count} CIDR entries"
+          echo "Compiling: ${json_file}"
+
+          sing-box rule-set compile \
+            --output "${srs_file}" \
+            "${json_file}"
+
+          echo "Created ${srs_file}"
+
+      - name: Commit and push changes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "github-actions[bot]@users.noreply.github.com"
+
+          git add -A ruleset
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update China IP ruleset"
+          git push origin HEAD:main
 
       - name: Delete old workflow runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
           repository: ${{ github.repository }}
           retain_days: 3
           keep_minimum_runs: 1
