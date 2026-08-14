@@ -115,7 +115,11 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: update China IP ruleset"
+          commit_date="$(date -u +%F)"
+
+          git commit \
+            -m "chore: update China IP ruleset (${commit_date})"
+
           git push origin HEAD:main
 
       - name: Delete old workflow runs
